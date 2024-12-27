@@ -1,42 +1,51 @@
-import pika
 import pickle
-import numpy as np
+import os
+import pika
 import json
- 
-# Читаем файл с сериализованной моделью
-with open('myfile.pkl', 'rb') as pkl_file:
+import numpy as np
+
+# Путь к файлу модели
+model_path = os.path.join(os.getcwd(), "myfile.pkl")
+
+# Проверяем, существует ли файл модели
+if not os.path.exists(model_path):
+    raise FileNotFoundError(f"Файл модели не найден: {model_path}")
+
+# Загружаем модель
+with open(model_path, 'rb') as pkl_file:
     regressor = pickle.load(pkl_file)
- 
+
+print("Модель успешно загружена!")
+
+# Подключение к RabbitMQ
 try:
-    # Создаём подключение по адресу rabbitmq:
     connection = pika.BlockingConnection(pika.ConnectionParameters(host='rabbitmq'))
     channel = connection.channel()
- 
-    # Объявляем очередь features
+
+    # объявляем очереди features и y_pred
     channel.queue_declare(queue='features')
-    # Объявляем очередь y_pred
     channel.queue_declare(queue='y_pred')
- 
-    # Создаём функцию callback для обработки данных из очереди
+
+    # функция обработки данных из очереди
     def callback(ch, method, properties, body):
-        print(f'Получен вектор признаков {body}')
-        features = json.loads(body)
-        pred = regressor.predict(np.array(features).reshape(1, -1))
-        channel.basic_publish(exchange='',
-                        routing_key='y_pred',
-                        body=json.dumps(pred[0]))
-        print(f'Предсказание {pred[0]} отправлено в очередь y_pred')
- 
+        try:
+            print(f'Получено сообщение: {body}')
+            message = json.loads(body)
+            if 'body' not in message:
+                raise ValueError("Сообщение не содержит ключа 'body'")
+            features = np.array(message['body'], dtype=float).reshape(1, -1)
+            pred = regressor.predict(features)
+            # формируем и публикуем сообщение с тем же id
+            channel.basic_publish(exchange='', routing_key='y_pred', body=json.dumps({'id': message['id'], 'body': pred[0]}))
+            print(f"Отправлено предсказание: {pred[0]}")
+        except Exception as e:
+            print(f"Ошибка в обработке сообщения: {e}")
+
     # Извлекаем сообщение из очереди features
-    # on_message_callback показывает, какую функцию вызвать при получении сообщения
-    channel.basic_consume(
-        queue='features',
-        on_message_callback=callback,
-        auto_ack=True
-    )
-    print('...Ожидание сообщений, для выхода нажмите CTRL+C')
- 
-    # Запускаем режим ожидания прихода сообщений
+    channel.basic_consume(queue='features', on_message_callback=callback, auto_ack=True)
+    print("Ожидание сообщений. Нажмите CTRL+C для выхода.")
+    # режим ожидания сообщений
     channel.start_consuming()
-except:
-    print('Не удалось подключиться к очереди')
+
+except Exception as e:
+    print(f"Ошибка подключения или обработки: {e}")
